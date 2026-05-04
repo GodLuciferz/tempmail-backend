@@ -27,6 +27,17 @@ const GMAIL_ACCOUNTS = [
   }
 ];
 
+function generateRandomString(length) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+
+  for (let i = 0; i < length; i++) {
+    result += chars[Math.floor(Math.random() * chars.length)];
+  }
+
+  return result;
+}
+
 function fetchEmails(account) {
   return new Promise((resolve) => {
     const imap = new Imap({
@@ -152,6 +163,52 @@ cron.schedule('*/30 * * * * *', async () => {
 app.get('/', (req, res) => res.json({ status: 'TempMail backend running!' }));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
+
+app.post('/generate', async (req, res) => {
+  const domains = ['apknox.online', 'noxzone111.online'];
+  const randomUser = generateRandomString(8);
+  const randomDomain = domains[Math.floor(Math.random() * domains.length)];
+  const email = `${randomUser}@${randomDomain}`;
+
+  const { error } = await supabase.from('inboxes').insert({
+    email
+  });
+
+  if (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+
+  res.json({
+    success: true,
+    email
+  });
+});
+
+app.get('/inbox/:address', async (req, res) => {
+  const { address } = req.params;
+
+  const { data, error } = await supabase
+    .from('emails')
+    .select('*')
+    .eq('to_address', address.toLowerCase())
+    .order('received_at', { ascending: false });
+
+  if (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+
+  res.json({
+    success: true,
+    email: address.toLowerCase(),
+    inbox: data
+  });
+});
 
 app.get('/emails/:address', async (req, res) => {
   const { address } = req.params;
