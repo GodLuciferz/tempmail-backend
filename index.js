@@ -28,90 +28,134 @@ const GMAIL_ACCOUNTS = [
 ];
 
 function fetchEmails(account) {
-  const imap = new Imap({
-    user: account.user,
-    password: account.password,
-    host: 'imap.gmail.com',
-    port: 993,
-    tls: true,
-    tlsOptions: { rejectUnauthorized: false }
-  });
+  return new Promise((resolve) => {
+    const imap = new Imap({
+      user: account.user,
+      password: account.password,
+      host: 'imap.gmail.com',
+      port: 993,
+      tls: true,
+      tlsOptions: { rejectUnauthorized: false }
+    });
 
-  imap.once('ready', () => {
-    imap.openBox('INBOX', false, (err, box) => {
-      if (err) { imap.end(); return; }
+    imap.once('ready', () => {
+      imap.openBox('INBOX', false, (err) => {
+        if (err) {
+          imap.end();
+          resolve();
+          return;
+        }
 
-      imap.search(['UNSEEN'], (err, results) => {
-        if (err || !results.length) { imap.end(); return; }
+        imap.search(['UNSEEN'], (err, results) => {
+          if (err || !results.length) {
+            imap.end();
+            resolve();
+            return;
+          }
 
-        const f = imap.fetch(results, { bodies: '' });
+          const f = imap.fetch(results, { bodies: '' });
+          const tasks = [];
 
-        f.on('message', (msg) => {
-          msg.on('body', (stream) => {
-            simpleParser(stream, async (err, parsed) => {
-              if (err) return;
+          f.on('message', (msg) => {
+            msg.on('body', (stream) => {
+              const task = simpleParser(stream)
+                .then(async (parsed) => {
+                  const toAddress = parsed.to?.text?.toLowerCase();
+                  const fromAddress = parsed.from?.text || '';
+                  const subject = parsed.subject || '(No Subject)';
+                  const bodyText = parsed.text || '';
+                  const bodyHtml = parsed.html || '';
 
-              const toAddress = parsed.to?.text?.toLowerCase();
-              const fromAddress = parsed.from?.text || '';
-              const subject = parsed.subject || '(No Subject)';
-              const bodyText = parsed.text || '';
-              const bodyHtml = parsed.html || '';
+                  if (!toAddress) return;
 
-              if (!toAddress) return;
+                  const { data: inbox } = await supabase
+                    .from('inboxes')
+                    .select('email')
+                    .eq('email', toAddress)
+                    .single();
 
-              // Check inbox exists
-              const { data: inbox } = await supabase
-                .from('inboxes')
-                .select('email')
-                .eq('email', toAddress)
-                .single();
+                  if (!inbox) return;
 
-              if (!inbox) return;
+                  const { data: existing } = await supabase
+                    .from('emails')
+                    .select('id')
+                    .eq('to_address', toAddress)
+                    .eq('from_address', fromAddress)
+                    .eq('subject', subject)
+                    .limit(1);
 
-              // Check duplicate
-              const { data: existing } = await supabase
-                .from('emails')
-                .select('id')
-                .eq('to_address', toAddress)
-                .eq('from_address', fromAddress)
-                .eq('subject', subject)
-                .limit(1);
+                  if (existing && existing.length > 0) return;
 
-              if (existing && existing.length > 0) return;
+                  await supabase.from('emails').insert({
+                    to_address: toAddress,
+                    from_address: fromAddress,
+                    subject,
+                    body_text: bodyText,
+                    body_html: bodyHtml
+                  });
 
-              await supabase.from('emails').insert({
-                to_address: toAddress,
-                from_address: fromAddress,
-                subject,
-                body_text: bodyText,
-                body_html: bodyHtml
-              });
+                  console.log(`Email saved: ${subject} -> ${toAddress}`);
+                })
+                .catch((err) => {
+                  console.log(`Parse/save error (${account.domain}):`, err.message);
+                });
 
-              console.log(`Email saved: ${subject} → ${toAddress}`);
+              tasks.push(task);
             });
           });
-        });
 
-        f.once('end', () => imap.end());
+          f.once('error', (err) => {
+            console.log(`Fetch error (${account.domain}):`, err.message);
+            imap.end();
+            resolve();
+          });
+
+          f.once('end', async () => {
+            await Promise.all(tasks);
+            imap.end();
+            resolve();
+          });
+        });
       });
     });
-  });
 
-  imap.once('error', (err) => console.log(`IMAP error (${account.domain}):`, err));
-  imap.connect();
+    imap.once('error', (err) => {
+      console.log(`IMAP error (${account.domain}):`, err.message);
+      resolve();
+    });
+
+    imap.once('end', () => {
+      resolve();
+    });
+
+    imap.connect();
+  });
 }
 
-// Poll every 60 seconds
-cron.schedule('* * * * *', () => {
+// Poll every 30 seconds
+let isPolling = false;
+
+cron.schedule('*/30 * * * * *', async () => {
+  if (isPolling) return;
+
+  isPolling = true;
   console.log('Polling emails...');
-  GMAIL_ACCOUNTS.forEach(fetchEmails);
+
+  try {
+    await Promise.all(GMAIL_ACCOUNTS.map(fetchEmails));
+  } finally {
+    isPolling = false;
+  }
 });
 
 // API Routes
 app.get('/', (req, res) => res.json({ status: 'TempMail backend running!' }));
 
+app.get('/health', (req, res) => res.json({ ok: true }));
+
 app.get('/emails/:address', async (req, res) => {
   const { address } = req.params;
+
   const { data, error } = await supabase
     .from('emails')
     .select('*')
@@ -119,13 +163,16 @@ app.get('/emails/:address', async (req, res) => {
     .order('received_at', { ascending: false });
 
   if (error) return res.status(500).json({ error });
+
   res.json(data);
 });
 
 app.delete('/inbox/:address', async (req, res) => {
   const { address } = req.params;
+
   await supabase.from('emails').delete().eq('to_address', address.toLowerCase());
   await supabase.from('inboxes').delete().eq('email', address.toLowerCase());
+
   res.json({ success: true });
 });
 
