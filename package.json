@@ -8,6 +8,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "imap": "^0.8.19",
+    "express-rate-limit": "^7.5.0"
     "mailparser": "^3.6.5",
     "@supabase/supabase-js": "^2.39.0",
     "node-cron": "^3.0.3",
