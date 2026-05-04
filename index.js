@@ -4,10 +4,48 @@ const { simpleParser } = require('mailparser');
 const { createClient } = require('@supabase/supabase-js');
 const cron = require('node-cron');
 const cors = require('cors');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const API_KEY = process.env.API_KEY || 'yusuf123';
+
+function requireApiKey(req, res, next) {
+  const key = req.headers['x-api-key'];
+
+  if (key !== API_KEY) {
+    return res.status(401).json({
+      success: false,
+      error: 'Invalid API key'
+    });
+  }
+
+  next();
+}
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many requests, try again later'
+  }
+});
+
+const generateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: 'Too many email generations, try again later'
+  }
+});
 
 const supabase = createClient(
   'https://cdvlbqislahfhjptlbuj.supabase.co',
@@ -164,7 +202,7 @@ app.get('/', (req, res) => res.json({ status: 'TempMail backend running!' }));
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
-app.post('/generate', async (req, res) => {
+app.post('/generate', requireApiKey, generateLimiter, async (req, res) => {
   const domains = ['apknox.online', 'noxzone111.online'];
   const randomUser = generateRandomString(8);
   const randomDomain = domains[Math.floor(Math.random() * domains.length)];
@@ -187,7 +225,7 @@ app.post('/generate', async (req, res) => {
   });
 });
 
-app.get('/inbox/:address', async (req, res) => {
+app.get('/inbox/:address', requireApiKey, apiLimiter, async (req, res) => {
   const { address } = req.params;
 
   const { data, error } = await supabase
